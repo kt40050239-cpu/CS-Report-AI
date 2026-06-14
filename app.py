@@ -249,7 +249,7 @@ def call_ai(cs_text: str, goal_text: str, author: str, quarter: str,
     except json.JSONDecodeError:
         fixed = json_str.rstrip().rstrip(',')
         if fixed.count('"') % 2 != 0:
-            fixed += '"\'
+            fixed += '"'
         open_arr = fixed.count('[') - fixed.count(']')
         open_obj = fixed.count('{') - fixed.count('}')
         fixed += ']' * max(open_arr, 0)
