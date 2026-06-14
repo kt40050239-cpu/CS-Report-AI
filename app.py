@@ -192,10 +192,10 @@ def call_ai(cs_text: str, goal_text: str, author: str, quarter: str,
 {f'분석 포커스: {focus}' if focus else ''}
 
 ## CS 주간 현황판 데이터 (2분기)
-{cs_text[:4000]}
+{cs_text[:2500]}
 
 ## 2분기 목표 목록
-{goal_text[:2500]}
+{goal_text[:1500]}
 
 다음 JSON 형식으로만 응답하세요 (```json 마커 없이 순수 JSON):
 {{
@@ -236,15 +236,39 @@ def call_ai(cs_text: str, goal_text: str, author: str, quarter: str,
 
     msg = client.messages.create(
         model="claude-sonnet-4-6",
-        max_tokens=4096,
+        max_tokens=6000,
         messages=[{"role": "user", "content": prompt}]
     )
     raw = msg.content[0].text
     raw = re.sub(r'```json|```', '', raw).strip()
     m = re.search(r'\{[\s\S]*\}', raw)
-    if m:
-        return json.loads(m.group())
-    return json.loads(raw)
+    json_str = m.group() if m else raw
+
+    try:
+        return json.loads(json_str)
+    except json.JSONDecodeError:
+        fixed = json_str.rstrip().rstrip(',')
+        if fixed.count('"') % 2 != 0:
+            fixed += '"\'
+        open_arr = fixed.count('[') - fixed.count(']')
+        open_obj = fixed.count('{') - fixed.count('}')
+        fixed += ']' * max(open_arr, 0)
+        fixed += '}' * max(open_obj, 0)
+        try:
+            return json.loads(fixed)
+        except Exception:
+            return {
+                "author": author, "quarter": quarter, "report_date": date_str,
+                "kpi_summary": [],
+                "okr_summary": [{"objective": "응답이 잘렸습니다 - 재시도 해주세요", "key_results": []}],
+                "goal_results": [],
+                "cs_weekly_summary": [],
+                "overall_evaluation": {
+                    "strengths": ["AI 응답이 너무 길어 잘렸습니다. AI 분석 포커스를 구체적으로 입력 후 재시도 해주세요."],
+                    "improvements": [],
+                    "next_quarter": []
+                }
+            }
 
 
 # ═══════════════════════════════════════════════════════════════
