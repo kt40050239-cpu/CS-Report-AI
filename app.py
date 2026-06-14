@@ -567,7 +567,7 @@ def build_result_excel(data: dict, author: str, quarter: str,
 
         wb._orig_injected = out_buf.getvalue()
 
-    wb.sheet_properties = openpyxl.workbook.workbook.WorkbookProperties()
+
 
     buf = io.BytesIO()
     wb.save(buf)
