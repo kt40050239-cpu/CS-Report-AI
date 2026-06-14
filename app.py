@@ -154,10 +154,13 @@ def parse_goal_excel(file_bytes: bytes) -> list:
     return goals
 
 
-def build_cs_text(cs_data: dict, max_chars: int = 4500) -> str:
+def build_cs_text(cs_data: dict, month_marks: list = None) -> str:
+    """month_marks가 있으면 해당 월만, 없으면 전체 — 글자수 제한 없음"""
     lines = []
     for sname, weeks in cs_data.items():
         for w in weeks:
+            if month_marks and not any(m in w['week'] for m in month_marks):
+                continue
             has_note   = any(v.get('note') for v in w['items'].values())
             has_result = bool(w['extra'].get('결과'))
             if not has_note and not has_result: continue
@@ -166,15 +169,15 @@ def build_cs_text(cs_data: dict, max_chars: int = 4500) -> str:
             for k, v in w['items'].items():
                 note = v.get('note','').replace('\n',' ').strip()
                 if not note: continue
-                lines.append(f"  {k}: 목표={v.get('target','-')}, 실적={v.get('actual','-')}, 비고={note[:180]}")
+                lines.append(f"  {k}: 목표={v.get('target','-')}, 실적={v.get('actual','-')}, 비고={note}")
             if has_result:
                 r = w['extra']['결과'].replace('\n',' / ').strip()
-                lines.append(f"  ▶결과: {r[:350]}")
+                lines.append(f"  ▶결과: {r}")
             if w['extra'].get('특이사항'):
                 s = w['extra']['특이사항'].replace('\n',' ').strip()
-                lines.append(f"  ★특이사항: {s[:150]}")
+                lines.append(f"  ★특이사항: {s}")
 
-    return '\n'.join(lines)[:max_chars]
+    return '\n'.join(lines)
 
 
 # ═══════════════════════════════════════════════════════
@@ -542,28 +545,56 @@ if run:
         total_weeks = sum(len(v) for v in cs_data.values())
         st.write(f"✅ 파싱 완료 — {total_weeks}개 주차 / {len(goal_data)}개 목표")
 
-        cs_text = build_cs_text(cs_data, max_chars=4500)
         goal_text = '\n'.join([
-            f"{i+1}. [{g['category']}/{g['grade']}] {g['goal'][:180]}"
-            + (f" / 미션: {g['mission'][:60]}" if g['mission'] else '')
+            f"{i+1}. [{g['category']}/{g['grade']}] {g['goal'][:200]}"
+            + (f" / 미션: {g['mission'][:80]}" if g['mission'] else '')
             for i, g in enumerate(goal_data)
-        ])[:1800]
+        ])
 
-        # ── 1단계: KPI·OKR·CS요약·종합평가
-        st.write("🤖 1단계 분석 중 (KPI · OKR · 요약)...")
+        # 월별로 CS 텍스트 분리 (제한 없이 전체 전달)
+        month_texts = {}
+        for mark in q_marks:
+            txt = build_cs_text(cs_data, [mark])
+            if txt.strip():
+                month_texts[mark] = txt
+        cs_text_all = build_cs_text(cs_data, q_marks)  # 전체 (1단계용)
+
+        # ── 1단계: KPI·OKR·CS요약·종합평가 (전체 데이터 요약)
+        st.write("🤖 1단계 분석 중 (KPI · OKR · 전체 요약)...")
         try:
-            r1 = call_ai_step1(cs_text, goal_text, author, quarter, focus_hint, str(report_date), api_key)
+            r1 = call_ai_step1(cs_text_all, goal_text, author, quarter, focus_hint, str(report_date), api_key)
             st.write(f"✅ 1단계 완료 — KPI {len(r1.get('kpi_summary',[]))}개")
         except Exception as e:
             st.error(f"1단계 오류: {e}"); st.stop()
 
-        # ── 2단계: 목표별 상세
-        st.write("🤖 2단계 분석 중 (목표별 날짜·상호·과정·결과)...")
-        try:
-            r2 = call_ai_step2(cs_text, goal_text, author, quarter, focus_hint, str(report_date), api_key)
-            st.write(f"✅ 2단계 완료 — 목표 {len(r2.get('goal_results',[]))}개")
-        except Exception as e:
-            st.error(f"2단계 오류: {e}"); st.stop()
+        # ── 2단계: 목표별 상세 — 월별로 나눠서 각각 호출 후 합치기
+        st.write(f"🤖 2단계 분석 중 (월별 상세 결과 {len(month_texts)}개월)...")
+        all_goal_results = []
+        for mark, mtext in month_texts.items():
+            month_label = mark.replace('26-', '') + '월'
+            st.write(f"  └ {month_label} 분석 중...")
+            try:
+                r_month = call_ai_step2(mtext, goal_text, author, quarter, focus_hint, str(report_date), api_key)
+                goals_month = r_month.get('goal_results', [])
+                all_goal_results.extend(goals_month)
+                st.write(f"  ✅ {month_label} 완료 — {len(goals_month)}개 목표")
+            except Exception as e:
+                st.warning(f"  ⚠️ {month_label} 오류: {e} (건너뜀)")
+
+        # 같은 목표 병합 (category+goal_title 기준으로 details 합치기)
+        merged = {}
+        for g in all_goal_results:
+            key = g.get('goal_title', g.get('category',''))
+            if key not in merged:
+                merged[key] = g.copy()
+            else:
+                merged[key]['details'] = merged[key].get('details',[]) + g.get('details',[])
+                # 달성/KPI는 마지막 값으로 덮어쓰기
+                if g.get('achievement'): merged[key]['achievement'] = g['achievement']
+                if g.get('kpi_rate'):   merged[key]['kpi_rate']    = g['kpi_rate']
+
+        r2 = {"goal_results": list(merged.values())}
+        st.write(f"✅ 2단계 완료 — 총 목표 {len(r2['goal_results'])}개")
 
         # 결과 합치기
         result = {**r1, **r2, "author": author, "quarter": quarter, "report_date": str(report_date)}
