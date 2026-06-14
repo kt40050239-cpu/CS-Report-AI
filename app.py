@@ -6,11 +6,7 @@ from openpyxl.utils import get_column_letter
 import pandas as pd
 import json, io, re, datetime
 
-st.set_page_config(
-    page_title="CS 결과보고 AI 자동작성",
-    page_icon="📊",
-    layout="wide",
-)
+st.set_page_config(page_title="CS 결과보고 AI 자동작성", page_icon="📊", layout="wide")
 
 st.markdown("""
 <style>
@@ -39,7 +35,6 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-# ── API 키
 api_key = ""
 try:
     api_key = st.secrets.get("ANTHROPIC_API_KEY", "")
@@ -48,15 +43,12 @@ except Exception:
 if not api_key:
     api_key = st.sidebar.text_input("Anthropic API Key", type="password")
 
-# ── 사이드바
 with st.sidebar:
     st.markdown("### ⚙️ 설정")
     author = st.text_input("작성자 이름", placeholder="예: 이호준")
     quarter = st.selectbox("보고 분기", [
-        "2026년 2분기 (4~6월)",
-        "2026년 3분기 (7~9월)",
-        "2026년 1분기 (1~3월)",
-        "2025년 4분기 (10~12월)",
+        "2026년 2분기 (4~6월)", "2026년 3분기 (7~9월)",
+        "2026년 1분기 (1~3월)", "2025년 4분기 (10~12월)",
     ])
     focus_hint = st.text_area("AI 분석 포커스 (선택)",
         placeholder="예: 계약갱신과 불만처리 중심으로\nKPI 달성률 강조", height=80)
@@ -70,35 +62,29 @@ with st.sidebar:
     apply_to_orig  = st.checkbox("원본 양식에 결과 주입", value=True)
 
 
-# ═══════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════
 # 파싱
-# ═══════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════
 
-def parse_cs_excel(file_bytes: bytes, person_name: str) -> dict:
+ITEM_KEYS = {'점검','계약','미수','초과','오버홀','오버홀 ','해피콜',
+             'PC DB 및 홍보','IT기술력 습득','블로그 댓글'}
+
+def parse_cs_excel(file_bytes: bytes, person_name: str, q_marks: list) -> dict:
     wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True)
 
-    # 작성자 시트 탐색
     target_sheet = None
     for sname in wb.sheetnames:
         for nv in [person_name, person_name[-2:], person_name[-3:]]:
             if nv and nv in sname:
-                target_sheet = sname
-                break
-        if target_sheet:
-            break
+                target_sheet = sname; break
+        if target_sheet: break
 
     skip = {'원본시트(수정금지)','----------','📊 대시보드','_옵션','_성장노트 오류로그','성장노트 종합'}
     sheets = [target_sheet] if target_sheet else [s for s in wb.sheetnames if not s.startswith('_') and s not in skip]
 
-    # 분기별 월 매핑
-    Q2 = ['26-04','26-05','26-06']
-
     result = {}
-    ITEM_KEYS = {'점검','계약','미수','초과','오버홀','오버홀 ','해피콜','PC DB 및 홍보','IT기술력 습득','블로그 댓글'}
-
     for sname in sheets:
-        if sname in skip or sname.startswith('_'):
-            continue
+        if sname in skip or sname.startswith('_'): continue
         ws = wb[sname]
         weeks = []
         current_week = None
@@ -108,79 +94,40 @@ def parse_cs_excel(file_bytes: bytes, person_name: str) -> dict:
         extra = {}
 
         for row in ws.iter_rows(values_only=True):
-            # 각 컬럼 안전하게 추출
-            c = [str(row[i]).strip() if len(row) > i and row[i] is not None else '' for i in range(8)]
+            c = [str(row[i]).strip() if len(row)>i and row[i] is not None else '' for i in range(8)]
 
-            # 새 주차 감지
-            if '주간 현황판' in c[0] and any(m in c[0] for m in Q2):
+            if '주간 현황판' in c[0] and any(m in c[0] for m in q_marks):
                 if current_week:
                     weeks.append({'week': current_week, 'items': dict(items), 'extra': dict(extra)})
-                current_week = c[0]
-                items = {}; extra = {}; in_table = False; after_result_hdr = False
+                current_week = c[0]; items={}; extra={}; in_table=False; after_result_hdr=False
                 continue
 
-            if not current_week:
-                continue
+            if not current_week: continue
 
-            # 헤더행
-            if c[0] == '항목':
-                in_table = True
-                continue
+            if c[0] == '항목': in_table=True; continue
 
-            # 항목 데이터행
             if in_table and c[0] in ITEM_KEYS:
-                key = c[0]
-                # col2=목표, col3=갯수(실적), col4=진행률, col5=비고
-                # 단, 진행률이 #DIV/0! 이거나 비어있어도 비고(c[5])는 유효
-                note = c[5] if c[5] else ''
-                items[key] = {
-                    'target': c[2],
-                    'actual': c[3],
-                    'rate':   c[4],
-                    'note':   note[:400],
+                items[c[0]] = {
+                    'target': c[2], 'actual': c[3], 'rate': c[4],
+                    'note': c[5][:400] if c[5] else '',
                 }
                 continue
 
-            # 이번주 종료
-            if c[0] == '이번주':
-                in_table = False
-                continue
+            if c[0] == '이번주': in_table=False; continue
 
-            # 결과 헤더행: col0=목표, col3=결과
             if c[0] == '목표' and c[3] == '결과':
-                after_result_hdr = True
-                continue
+                after_result_hdr=True; continue
 
-            # 실제 결과 내용행: col0=이번주목표, col3=이번주결과
             if after_result_hdr:
-                if c[3] and len(c[3]) > 5:
-                    extra['결과'] = c[3][:600]
-                after_result_hdr = False
-                continue
+                if c[3] and len(c[3]) > 5: extra['결과'] = c[3][:600]
+                after_result_hdr=False; continue
 
-            # 특이사항 (col0에 내용 있음)
-            if '특이사항' in c[0]:
-                content = c[0]
-                if len(content) < 15:  # 헤더만 있는 경우 다음행 내용
-                    extra['_특이사항_다음행'] = True
-                else:
-                    extra['특이사항'] = content[:300]
-                continue
-
-            if extra.get('_특이사항_다음행') and c[0] and len(c[0]) > 5:
+            if '특이사항' in c[0] and len(c[0]) > 15:
                 extra['특이사항'] = c[0][:300]
-                del extra['_특이사항_다음행']
-                continue
-
-            # 배운점
-            if '배운점' in c[0] and len(c[0]) > 15:
-                extra['배운점'] = c[0][:300]
 
         if current_week:
             weeks.append({'week': current_week, 'items': dict(items), 'extra': dict(extra)})
-
-        if weeks:
-            result[sname] = weeks
+        if weeks: result[sname] = weeks
 
     return result
 
@@ -190,146 +137,148 @@ def parse_goal_excel(file_bytes: bytes) -> list:
     goals = []
     skip = {'_성장노트 오류로그','성장노트 종합','_옵션'}
     for sname in wb.sheetnames:
-        if sname.startswith('_') or '수정금지' in sname or sname in skip:
-            continue
+        if sname.startswith('_') or '수정금지' in sname or sname in skip: continue
         ws = wb[sname]
         for row_idx, row in enumerate(ws.iter_rows(values_only=True), 1):
-            if row_idx < 9:
-                continue
-            if not (row[1] and row[4]):
-                continue
+            if row_idx < 9: continue
+            if not (row[1] and row[4]): continue
             goal_text = str(row[4]).strip()
-            if len(goal_text) < 5:
-                continue
+            if len(goal_text) < 5: continue
             goals.append({
-                'row':      row_idx,
-                'sheet':    sname,
+                'row': row_idx, 'sheet': sname,
                 'category': str(row[1] or '').strip(),
                 'grade':    str(row[3] or '').strip(),
-                'goal':     goal_text[:250],
-                'mission':  str(row[10] or '').strip()[:150] if len(row) > 10 else '',
+                'goal':     goal_text[:200],
+                'mission':  str(row[10] or '').strip()[:100] if len(row)>10 else '',
             })
     return goals
 
 
-def build_cs_text(cs_data: dict, max_chars: int = 5000) -> str:
+def build_cs_text(cs_data: dict, max_chars: int = 4500) -> str:
     lines = []
     for sname, weeks in cs_data.items():
         for w in weeks:
-            # 데이터 있는 항목만
             has_note   = any(v.get('note') for v in w['items'].values())
             has_result = bool(w['extra'].get('결과'))
-            if not has_note and not has_result:
-                continue
+            if not has_note and not has_result: continue
 
             lines.append(f"\n[{w['week']}]")
-
             for k, v in w['items'].items():
                 note = v.get('note','').replace('\n',' ').strip()
-                if not note:
-                    continue
-                t = v.get('target','') or '-'
-                a = v.get('actual','') or '-'
-                lines.append(f"  {k}: 목표={t}, 실적={a}, 비고={note[:200]}")
-
+                if not note: continue
+                lines.append(f"  {k}: 목표={v.get('target','-')}, 실적={v.get('actual','-')}, 비고={note[:180]}")
             if has_result:
                 r = w['extra']['결과'].replace('\n',' / ').strip()
-                lines.append(f"  ▶이번주결과: {r[:400]}")
-
+                lines.append(f"  ▶결과: {r[:350]}")
             if w['extra'].get('특이사항'):
                 s = w['extra']['특이사항'].replace('\n',' ').strip()
-                lines.append(f"  ★특이사항: {s[:200]}")
+                lines.append(f"  ★특이사항: {s[:150]}")
 
     return '\n'.join(lines)[:max_chars]
 
 
-# ═══════════════════════════════════════════════════════════════
-# AI 호출
-# ═══════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════
+# AI — 2단계 분리 호출 (JSON 잘림 방지)
+# ═══════════════════════════════════════════════════════
 
-def call_ai(cs_text, goal_text, author, quarter, focus, date_str, api_key):
-    client = anthropic.Anthropic(api_key=api_key)
-
-    prompt = f"""당신은 CS 업무 결과보고 전문가입니다.
-아래는 {author}의 {quarter} 실제 주간현황판 데이터입니다.
-반드시 아래 데이터에 실제로 존재하는 날짜·상호명·수치·내용만 사용하세요. 절대 임의로 만들지 마세요.
-보고일: {date_str}
-{f'분석 포커스: {focus}' if focus else ''}
-
-## CS 주간 현황판 실제 데이터 (4~6월)
-{cs_text}
-
-## 2분기 목표 목록
-{goal_text}
-
-위 실제 데이터를 바탕으로 아래 JSON 형식으로만 응답하세요 (```없이 순수 JSON):
-{{
-  "author": "{author}",
-  "quarter": "{quarter}",
-  "report_date": "{date_str}",
-  "kpi_summary": [
-    {{"item":"항목명","target":"주간목표","actual":"실제달성","rate":"달성율%","note":"주요내용(실제상호명포함)"}}
-  ],
-  "okr_summary": [
-    {{"objective":"Objective 한줄","key_results":["KR1 실제수치포함","KR2","KR3"]}}
-  ],
-  "goal_results": [
-    {{
-      "category":"구분",
-      "goal_title":"목표제목 30자이내",
-      "okr_objective":"Objective 한줄",
-      "key_results":["KR1 실제수치","KR2","KR3"],
-      "details":[
-        {{"date":"실제날짜(예:5/7)","company":"실제상호명","process":"실제과정 2~3문장","result":"실제결과"}}
-      ],
-      "achievement":"완료|진행중|미달",
-      "kpi_rate":"달성율%"
-    }}
-  ],
-  "cs_weekly_summary":[
-    {{"item":"항목","target":"목표","actual":"실적","rate":"진행률","note":"실제내용(상호명포함)"}}
-  ],
-  "overall_evaluation":{{
-    "strengths":["실제근거있는 잘된점1","잘된점2","잘된점3"],
-    "improvements":["아쉬운점1","아쉬운점2"],
-    "next_quarter":["계획1","계획2","계획3"]
-  }}
-}}"""
-
-    msg = client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=6000,
-        messages=[{"role": "user", "content": prompt}]
-    )
-    raw = re.sub(r'```json|```', '', msg.content[0].text).strip()
+def safe_json(raw: str, fallback: dict) -> dict:
+    raw = re.sub(r'```json|```', '', raw).strip()
     m = re.search(r'\{[\s\S]*\}', raw)
     json_str = m.group() if m else raw
-
     try:
         return json.loads(json_str)
     except json.JSONDecodeError:
         fixed = json_str.rstrip().rstrip(',')
-        if fixed.count('"') % 2 != 0:
-            fixed += '"'
+        if fixed.count('"') % 2 != 0: fixed += '"'
         fixed += ']' * max(fixed.count('[') - fixed.count(']'), 0)
         fixed += '}' * max(fixed.count('{') - fixed.count('}'), 0)
         try:
             return json.loads(fixed)
         except Exception:
-            return {
-                "author": author, "quarter": quarter, "report_date": date_str,
-                "kpi_summary": [], "okr_summary": [], "goal_results": [],
-                "cs_weekly_summary": [],
-                "overall_evaluation": {
-                    "strengths": ["AI 응답이 잘렸습니다. 재시도 해주세요."],
-                    "improvements": [], "next_quarter": []
-                }
-            }
+            return fallback
 
 
-# ═══════════════════════════════════════════════════════════════
+def call_ai_step1(cs_text, goal_text, author, quarter, focus, date_str, api_key):
+    """1단계: KPI · OKR · CS주간요약 · 종합평가"""
+    client = anthropic.Anthropic(api_key=api_key)
+    prompt = f"""당신은 CS 업무 결과보고 전문가입니다.
+{author}의 {quarter} 실제 데이터 기반 결과보고입니다. 보고일: {date_str}
+{f'포커스: {focus}' if focus else ''}
+
+## CS 주간 현황판 (4~6월 실제 데이터)
+{cs_text}
+
+## 목표 목록
+{goal_text}
+
+아래 JSON만 응답 (```없이):
+{{
+  "kpi_summary": [
+    {{"item":"항목명","target":"주간목표","actual":"실제달성","rate":"달성율%","note":"주요내용(실제상호명포함)"}}
+  ],
+  "okr_summary": [
+    {{"objective":"Objective 한줄","key_results":["KR1 실제수치","KR2","KR3"]}}
+  ],
+  "cs_weekly_summary": [
+    {{"item":"항목","target":"목표","actual":"실적","rate":"진행률","note":"실제내용"}}
+  ],
+  "overall_evaluation": {{
+    "strengths": ["실제근거 잘된점1","잘된점2","잘된점3"],
+    "improvements": ["아쉬운점1","아쉬운점2"],
+    "next_quarter": ["계획1","계획2","계획3"]
+  }}
+}}"""
+
+    msg = client.messages.create(
+        model="claude-sonnet-4-6", max_tokens=3000,
+        messages=[{"role":"user","content":prompt}]
+    )
+    return safe_json(msg.content[0].text, {
+        "kpi_summary":[], "okr_summary":[], "cs_weekly_summary":[], "overall_evaluation":{}
+    })
+
+
+def call_ai_step2(cs_text, goal_text, author, quarter, focus, date_str, api_key):
+    """2단계: 목표별 상세 결과 (날짜·상호·과정·결과)"""
+    client = anthropic.Anthropic(api_key=api_key)
+    prompt = f"""당신은 CS 업무 결과보고 전문가입니다.
+{author}의 {quarter} 목표별 상세 결과를 작성합니다. 보고일: {date_str}
+반드시 실제 데이터의 날짜·상호명만 사용하세요.
+{f'포커스: {focus}' if focus else ''}
+
+## CS 주간 현황판 (실제 데이터)
+{cs_text}
+
+## 목표 목록
+{goal_text}
+
+아래 JSON만 응답 (```없이):
+{{
+  "goal_results": [
+    {{
+      "category": "구분(자기개발/매출증대/매출안정/효율성/소통 중 하나)",
+      "goal_title": "목표제목 25자이내",
+      "okr_objective": "Objective 한줄",
+      "key_results": ["KR1 실제수치포함","KR2","KR3"],
+      "details": [
+        {{"date":"실제날짜예:5/7","company":"실제상호명","process":"실제과정 2문장","result":"실제결과"}}
+      ],
+      "achievement": "완료|진행중|미달",
+      "kpi_rate": "달성율%"
+    }}
+  ]
+}}"""
+
+    msg = client.messages.create(
+        model="claude-sonnet-4-6", max_tokens=4000,
+        messages=[{"role":"user","content":prompt}]
+    )
+    return safe_json(msg.content[0].text, {"goal_results":[]})
+
+
+# ═══════════════════════════════════════════════════════
 # 엑셀 생성
-# ═══════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════
 
 def thin_border():
     s = Side(style='thin', color='BFBFBF')
@@ -360,7 +309,7 @@ def add_title(ws, r, c1, c2, val):
     ws.row_dimensions[r].height = 38
     ws.merge_cells(start_row=r, start_column=c1, end_row=r, end_column=c2)
     c = ws.cell(row=r, column=c1, value=val)
-    c.font = Font(name='맑은 고딕', size=15, bold=True, color='FFFFFF')
+    c.font = Font(name='맑은 고딕', size=14, bold=True, color='FFFFFF')
     c.fill = PatternFill('solid', fgColor='1F3864')
     c.alignment = Alignment(horizontal='center', vertical='center')
     c.border = thin_border()
@@ -370,8 +319,16 @@ def add_title(ws, r, c1, c2, val):
 def build_result_excel(data, author, quarter, opts, orig_goal_bytes):
     wb = openpyxl.Workbook()
     wb.remove(wb.active)
+    COLOR_MAP = {
+        '자기개발':  ('7030A0','EAD1DC'),
+        '매출증대':  ('375623','E2EFDA'),
+        '메출 증대': ('375623','E2EFDA'),
+        '매출안정':  ('C55A11','FCE4D6'),
+        '효율성':    ('2E75B6','D6E4F7'),
+        '소통':      ('1F3864','BDD7EE'),
+        '미션':      ('C00000','FFE7E7'),
+    }
 
-    # OKR
     if opts.get('okr'):
         ws = wb.create_sheet('OKR 요약')
         ws.sheet_view.showGridLines = False
@@ -389,7 +346,6 @@ def build_result_excel(data, author, quarter, opts, orig_goal_bytes):
                 row += 1
             row += 1
 
-    # KPI
     if opts.get('kpi'):
         ws = wb.create_sheet('KPI 실적')
         ws.sheet_view.showGridLines = False
@@ -413,7 +369,6 @@ def build_result_excel(data, author, quarter, opts, orig_goal_bytes):
             dat(ws, row, 6, r.get('note',''),   bg=bg, sz=9)
             row += 1
 
-    # 상세 결과
     if opts.get('detail'):
         ws = wb.create_sheet('목표별 상세 결과')
         ws.sheet_view.showGridLines = False
@@ -425,16 +380,6 @@ def build_result_excel(data, author, quarter, opts, orig_goal_bytes):
             hdr(ws, row, 2+ci, h)
         row += 1
 
-        COLOR_MAP = {
-            '자기개발':  ('7030A0','EAD1DC'),
-            '매출증대':  ('375623','E2EFDA'),
-            '메출 증대': ('375623','E2EFDA'),
-            '매출안정':  ('C55A11','FCE4D6'),
-            '효율성':    ('2E75B6','D6E4F7'),
-            '소통':      ('1F3864','BDD7EE'),
-            '미션':      ('C00000','FFE7E7'),
-        }
-
         for goal in data.get('goal_results',[]):
             cat = goal.get('category','')
             hd_col, row_col = COLOR_MAP.get(cat, ('595959','F2F2F2'))
@@ -443,8 +388,8 @@ def build_result_excel(data, author, quarter, opts, orig_goal_bytes):
             sr = row
 
             ws.merge_cells(start_row=sr, start_column=2, end_row=sr+n-1, end_column=2)
-            title_val = f'[{cat}]\n{goal.get("goal_title","")}\n▶ {goal.get("achievement","")}  {goal.get("kpi_rate","")}'
-            c = ws.cell(row=sr, column=2, value=title_val)
+            tv = f'[{cat}]\n{goal.get("goal_title","")}\n▶ {goal.get("achievement","")}  {goal.get("kpi_rate","")}'
+            c = ws.cell(row=sr, column=2, value=tv)
             c.font = Font(name='맑은 고딕', size=9, bold=True, color='FFFFFF')
             c.fill = PatternFill('solid', fgColor=hd_col)
             c.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
@@ -470,7 +415,6 @@ def build_result_excel(data, author, quarter, opts, orig_goal_bytes):
             ws.row_dimensions[row].height = 4
             row += 1
 
-    # CS 주간 요약
     ws_cs = wb.create_sheet('CS 주간 요약')
     ws_cs.sheet_view.showGridLines = False
     for col, w in zip('ABCDEF', [3,18,11,11,10,46]):
@@ -490,7 +434,6 @@ def build_result_excel(data, author, quarter, opts, orig_goal_bytes):
         dat(ws_cs, row, 6, r.get('note',''),   bg=bg, sz=9)
         row += 1
 
-    # 종합 평가
     if opts.get('eval'):
         ws_ev = wb.create_sheet('종합 평가')
         ws_ev.sheet_view.showGridLines = False
@@ -518,24 +461,20 @@ def build_result_excel(data, author, quarter, opts, orig_goal_bytes):
             f'작성자: {author}   |   보고일: {data.get("report_date","")}   |   결재: 팀장 □  부장 □  본부장 □',
             bg='F2F2F2', bold=True, align='center')
 
-    # 원본 주입
     if opts.get('orig') and orig_goal_bytes:
         try:
             wb_orig = openpyxl.load_workbook(io.BytesIO(orig_goal_bytes))
             for sname in wb_orig.sheetnames:
-                if sname.startswith('_') or '수정금지' in sname:
-                    continue
+                if sname.startswith('_') or '수정금지' in sname: continue
                 ws_orig = wb_orig[sname]
                 for row_idx in range(9, ws_orig.max_row+1):
                     cat_cell = ws_orig.cell(row=row_idx, column=2).value
-                    if not cat_cell:
-                        continue
+                    if not cat_cell: continue
                     cat_str = str(cat_cell).strip()
                     match = next((g for g in data.get('goal_results',[])
                                   if g.get('category','')[:4] in cat_str
                                   or cat_str[:4] in g.get('category','')), None)
-                    if not match:
-                        continue
+                    if not match: continue
                     detail_lines = '\n'.join(
                         f"▶ {d.get('date','')} {d.get('company','')} / {d.get('result','')}"
                         for d in match.get('details',[])[:3]
@@ -556,21 +495,19 @@ def build_result_excel(data, author, quarter, opts, orig_goal_bytes):
     return buf.getvalue()
 
 
-# ═══════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════
 # UI
-# ═══════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════
 
 col1, col2 = st.columns(2)
 with col1:
     st.markdown("#### 📁 CS 주간 현황판")
     cs_file = st.file_uploader("CS", type=['xlsx','xls'], key='cs_file', label_visibility='collapsed')
-    if cs_file:
-        st.success(f"✅ {cs_file.name}")
+    if cs_file: st.success(f"✅ {cs_file.name}")
 with col2:
-    st.markdown("#### 🎯 개인 2분기 목표")
+    st.markdown("#### 🎯 개인 목표")
     goal_file = st.file_uploader("목표", type=['xlsx','xls'], key='goal_file', label_visibility='collapsed')
-    if goal_file:
-        st.success(f"✅ {goal_file.name}")
+    if goal_file: st.success(f"✅ {goal_file.name}")
 
 st.markdown("---")
 ready = bool(cs_file and goal_file and author and api_key)
@@ -588,49 +525,60 @@ if run:
     cs_bytes   = cs_file.read()
     goal_bytes = goal_file.read()
 
+    # 분기 월 매핑
+    Q_MAP = {
+        "2026년 2분기 (4~6월)":  ['26-04','26-05','26-06'],
+        "2026년 3분기 (7~9월)":  ['26-07','26-08','26-09'],
+        "2026년 1분기 (1~3월)":  ['26-01','26-02','26-03'],
+        "2025년 4분기 (10~12월)":['25-10','25-11','25-12'],
+    }
+    q_marks = Q_MAP.get(quarter, ['26-04','26-05','26-06'])
+
     with st.status("AI가 데이터를 분석 중입니다...", expanded=True) as status:
         st.write("📂 파일 파싱 중...")
-        cs_data   = parse_cs_excel(cs_bytes, author)
+        cs_data   = parse_cs_excel(cs_bytes, author, q_marks)
         goal_data = parse_goal_excel(goal_bytes)
 
         total_weeks = sum(len(v) for v in cs_data.values())
-        st.write(f"✅ CS 파싱 완료 — {total_weeks}개 주차 / {len(goal_data)}개 목표")
+        st.write(f"✅ 파싱 완료 — {total_weeks}개 주차 / {len(goal_data)}개 목표")
 
-        # 디버그: 파싱된 주차 목록 표시
-        for sname, weeks in cs_data.items():
-            week_names = [w['week'][:20] for w in weeks if any(v.get('note') for v in w['items'].values()) or w['extra'].get('결과')]
-            st.write(f"📋 데이터 있는 주차: {week_names}")
-
-        cs_text   = build_cs_text(cs_data, max_chars=5000)
-        goal_lines = [
-            f"{i+1}. [{g['category']}/{g['grade']}] {g['goal'][:200]}"
-            + (f" / 미션: {g['mission'][:80]}" if g['mission'] else '')
+        cs_text = build_cs_text(cs_data, max_chars=4500)
+        goal_text = '\n'.join([
+            f"{i+1}. [{g['category']}/{g['grade']}] {g['goal'][:180]}"
+            + (f" / 미션: {g['mission'][:60]}" if g['mission'] else '')
             for i, g in enumerate(goal_data)
-        ]
-        goal_text = '\n'.join(goal_lines)[:2000]
+        ])[:1800]
 
-        st.write("🤖 Claude 분석 중...")
+        # ── 1단계: KPI·OKR·CS요약·종합평가
+        st.write("🤖 1단계 분석 중 (KPI · OKR · 요약)...")
         try:
-            result = call_ai(cs_text, goal_text, author, quarter,
-                             focus_hint, str(report_date), api_key)
-            st.write(f"✅ 분석 완료 — 목표 {len(result.get('goal_results',[]))}개 · KPI {len(result.get('kpi_summary',[]))}개")
+            r1 = call_ai_step1(cs_text, goal_text, author, quarter, focus_hint, str(report_date), api_key)
+            st.write(f"✅ 1단계 완료 — KPI {len(r1.get('kpi_summary',[]))}개")
         except Exception as e:
-            st.error(f"AI 오류: {e}")
-            st.stop()
+            st.error(f"1단계 오류: {e}"); st.stop()
+
+        # ── 2단계: 목표별 상세
+        st.write("🤖 2단계 분석 중 (목표별 날짜·상호·과정·결과)...")
+        try:
+            r2 = call_ai_step2(cs_text, goal_text, author, quarter, focus_hint, str(report_date), api_key)
+            st.write(f"✅ 2단계 완료 — 목표 {len(r2.get('goal_results',[]))}개")
+        except Exception as e:
+            st.error(f"2단계 오류: {e}"); st.stop()
+
+        # 결과 합치기
+        result = {**r1, **r2, "author": author, "quarter": quarter, "report_date": str(report_date)}
 
         st.write("📊 엑셀 생성 중...")
         opts = {
             'okr': include_okr, 'kpi': include_kpi,
-            'detail': include_detail, 'eval': include_eval,
-            'orig': apply_to_orig,
+            'detail': include_detail, 'eval': include_eval, 'orig': apply_to_orig,
         }
         try:
             excel_bytes = build_result_excel(result, author, quarter, opts,
                                              goal_bytes if apply_to_orig else None)
             st.write("✅ 엑셀 생성 완료")
         except Exception as e:
-            st.error(f"엑셀 오류: {e}")
-            st.stop()
+            st.error(f"엑셀 오류: {e}"); st.stop()
 
         status.update(label="✅ 결과보고 작성 완료!", state="complete")
 
@@ -650,18 +598,15 @@ if 'result' in st.session_state:
     dl1, dl2 = st.columns([2,1])
     with dl1:
         st.download_button(
-            "📥 결과보고서 다운로드 (.xlsx)",
-            data=xl,
+            "📥 결과보고서 다운로드 (.xlsx)", data=xl,
             file_name=f"{_author}_{_qtr.split('(')[0].strip()}_결과보고.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True, type="primary"
         )
     with dl2:
         st.download_button(
-            "📋 JSON",
-            data=json.dumps(result, ensure_ascii=False, indent=2).encode('utf-8'),
-            file_name=f"{_author}_결과보고.json",
-            mime="application/json",
+            "📋 JSON", data=json.dumps(result, ensure_ascii=False, indent=2).encode('utf-8'),
+            file_name=f"{_author}_결과보고.json", mime="application/json",
             use_container_width=True
         )
 
