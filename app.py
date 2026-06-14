@@ -105,6 +105,8 @@ def parse_cs_excel(file_bytes: bytes, person_name: str) -> dict:
         ITEM_KEYS = {'점검','계약','미수','초과','오버홀','오버홀 ','해피콜','PC DB 및 홍보','IT기술력 습득','블로그 댓글'}
         Q2_MARKS  = ['26-04','26-05','26-06']
 
+        after_result_header = False   # "목표 / 결과 / 목표" 헤더 다음 행 감지
+
         for row in ws.iter_rows(values_only=True):
             v0 = str(row[0]).strip() if row[0] else ''
             v3 = str(row[3]).strip() if len(row) > 3 and row[3] else ''
@@ -114,7 +116,8 @@ def parse_cs_excel(file_bytes: bytes, person_name: str) -> dict:
             if '주간 현황판' in v0 and any(m in v0 for m in Q2_MARKS):
                 if current_week:
                     weeks.append({'week': current_week, 'items': dict(items), 'extra': dict(extra)})
-                current_week = v0; items = {}; extra = {}; in_table = False
+                current_week = v0; items = {}; extra = {}
+                in_table = False; after_result_header = False
 
             if not current_week:
                 continue
@@ -124,11 +127,19 @@ def parse_cs_excel(file_bytes: bytes, person_name: str) -> dict:
                 continue
 
             if in_table and v0 in ITEM_KEYS:
+                # 비고는 col[5], 갯수는 col[3] — 목표가 없으면 비고가 col[3]으로 밀릴 수 있음
+                target_val = row[2] if len(row) > 2 else ''
+                actual_val = row[3] if len(row) > 3 else ''
+                rate_val   = row[4] if len(row) > 4 else ''
+                note_val   = row[5] if len(row) > 5 else ''
+                # 목표가 없고 비고가 col[3]에 있는 경우 (계약·점검 등)
+                if not target_val and not actual_val and not note_val and v3:
+                    note_val = v3
                 items[v0] = {
-                    'target': row[2] if len(row) > 2 else '',
-                    'actual': row[3] if len(row) > 3 else '',
-                    'rate':   row[4] if len(row) > 4 else '',
-                    'note':   str(row[5] or '')[:300] if len(row) > 5 else '',
+                    'target': target_val,
+                    'actual': actual_val,
+                    'rate':   rate_val,
+                    'note':   str(note_val or '')[:400],
                 }
                 continue
 
@@ -136,14 +147,20 @@ def parse_cs_excel(file_bytes: bytes, person_name: str) -> dict:
                 in_table = False
                 continue
 
-            # 이번주 결과 텍스트 (col D)
-            if v0 == '목표' and v3:
-                extra['결과'] = v3[:600]
+            # "목표 / 결과 / 목표" 헤더 행 — 다음 행이 실제 결과
+            if v0 == '목표' and v3 == '결과':
+                after_result_header = True
+                continue
+
+            # 실제 결과 내용 행 (col[3] = 이번주 결과 텍스트)
+            if after_result_header and v3 and len(v3) > 10:
+                extra['결과'] = v3[:800]
+                after_result_header = False
 
             # 특이사항
             if '특이사항' in v0:
                 txt = str(row[0] or '') + ' ' + str(row[6] or '')
-                extra['특이사항'] = txt[:300]
+                extra['특이사항'] = txt[:400]
 
             # 배운점
             if '배운점' in v0:
@@ -196,18 +213,29 @@ def parse_goal_excel(file_bytes: bytes) -> list:
 # CS 데이터를 AI용 압축 텍스트로 변환
 # ═══════════════════════════════════════════════════════════════
 
-def build_cs_text(cs_data: dict, max_chars: int = 4000) -> str:
+def build_cs_text(cs_data: dict, max_chars: int = 5000) -> str:
     lines = []
     for sname, weeks in cs_data.items():
         for w in weeks:
+            # 데이터가 없는 빈 주차는 건너뜀
+            has_data = any(v.get('note') for v in w['items'].values()) or w['extra'].get('결과')
+            if not has_data:
+                continue
             lines.append(f"\n[{w['week']}]")
             for k, v in w['items'].items():
-                note = v['note'].replace('\n', ' ').strip()
-                lines.append(f"  {k}: 목표={v['target']}, 실적={v['actual']}, 비고={note[:150]}")
+                note = str(v.get('note','')).replace('\n', ' ').strip()
+                if not note:
+                    continue
+                target = v.get('target','') or '-'
+                actual = v.get('actual','') or '-'
+                lines.append(f"  {k}: 목표={target}, 실적={actual}, 비고={note[:200]}")
+            # 이번주 결과 (가장 중요한 실제 실적 내용)
             if w['extra'].get('결과'):
-                lines.append(f"  ▶결과: {w['extra']['결과'][:200]}")
+                result_txt = w['extra']['결과'].replace('\n', ' / ').strip()
+                lines.append(f"  ▶이번주결과: {result_txt[:400]}")
             if w['extra'].get('특이사항'):
-                lines.append(f"  ★특이사항: {w['extra']['특이사항'][:150]}")
+                sp_txt = w['extra']['특이사항'].replace('\n', ' ').strip()
+                lines.append(f"  ★특이사항: {sp_txt[:200]}")
     full = '\n'.join(lines)
     return full[:max_chars]
 
